@@ -49,11 +49,12 @@ import itertools
 import os
 import re
 from collections import namedtuple as T
-from typing import Optional, Union, BinaryIO, Tuple, List, Callable
+from collections.abc import Callable
 
 from .utf import UTFTable, R
 from .disarm import DisarmContext
 
+# fmt: off
 WAVEFORM_ENCODE_TYPE_ADX          = 0
 WAVEFORM_ENCODE_TYPE_HCA          = 2
 WAVEFORM_ENCODE_TYPE_VAG          = 7
@@ -67,8 +68,9 @@ wave_type_ftable = {
     WAVEFORM_ENCODE_TYPE_VAG          : ".vag",
     WAVEFORM_ENCODE_TYPE_ATRAC3       : ".at3",
     WAVEFORM_ENCODE_TYPE_BCWAV        : ".bcwav",
-    WAVEFORM_ENCODE_TYPE_NINTENDO_DSP : ".dsp"}
-
+    WAVEFORM_ENCODE_TYPE_NINTENDO_DSP : ".dsp"
+}
+# fmt: on
 track_t = T(
     "track_t",
     ("cue_id", "name", "enc_type", "is_stream"),
@@ -87,7 +89,7 @@ class TrackList(object):
         wavs = UTFTable(wav_handle, encoding=utf.encoding)
         syns = UTFTable(syn_handle, encoding=utf.encoding)
 
-        self.tracks: List[track_t] = []
+        self.tracks: list[track_t] = []
 
         name_map = {}
         for row in nams.rows:
@@ -123,12 +125,15 @@ class TrackList(object):
 def align(n):
     def _align(number):
         return (number + n - 1) & ~(n - 1)
+
     return _align
+
 
 afs2_file_ent_t = T("afs2_file_ent_t", ("cue_id", "offset", "size"))
 
+
 class AFSArchive(object):
-    def __init__(self, file: BinaryIO, *, encoding: Optional[str] = None):
+    def __init__(self, file: io.BufferedIOBase, *, encoding: str | None = None):
         # Note: we don't do anything involving strings here so encoding is not actually required
         buf = R(file, encoding=encoding or "utf-8")
 
@@ -141,21 +146,23 @@ class AFSArchive(object):
 
         if version[0] >= 0x02:
             self.alignment: int = buf.le_uint16_t()
-            self.mix_key: Optional[int] = buf.le_uint16_t()
+            self.mix_key: int | None = buf.le_uint16_t()
         else:
             self.alignment: int = buf.le_uint32_t()
-            self.mix_key: Optional[int] = None
+            self.mix_key: int | None = None
 
-        #print("afs2:", file_count, "files in ar")
-        #print("afs2: aligned to", self.alignment, "bytes")
+        # print("afs2:", file_count, "files in ar")
+        # print("afs2: aligned to", self.alignment, "bytes")
 
         self.offset_size: int = version[1]
         self.offset_mask: int = int("FF" * self.offset_size, 16)
         cue_id_size = version[2]
-        #print("afs2: a file offset is", self.offset_size, "bytes")
+        # print("afs2: a file offset is", self.offset_size, "bytes")
 
-        self.files: List[afs2_file_ent_t] = []
-        self.create_file_entries(buf, file_count, cue_id_size, self.offset_size, self.offset_mask)
+        self.files: list[afs2_file_ent_t] = []
+        self.create_file_entries(
+            buf, file_count, cue_id_size, self.offset_size, self.offset_mask
+        )
         self.src = buf
 
     def _struct_format(self, size):
@@ -163,13 +170,18 @@ class AFSArchive(object):
             return "H"
         elif size == 4:
             return "I"
-        else:
-            raise ValueError("Cannot deal with size {0} at this time".format(size))
+        raise ValueError(f"Cannot deal with size {size} at this time")
 
-    def create_file_entries(self, buf, file_count, cue_id_size, offset_size, offset_mask):
+    def create_file_entries(
+        self, buf, file_count, cue_id_size, offset_size, offset_mask
+    ):
         buf.seek(0x10)
-        read_cue_ids = struct.Struct("<" + (self._struct_format(cue_id_size) * file_count))
-        read_raw_offs = struct.Struct("<" + (self._struct_format(offset_size) * (file_count + 1)))
+        read_cue_ids = struct.Struct(
+            "<" + (self._struct_format(cue_id_size) * file_count)
+        )
+        read_raw_offs = struct.Struct(
+            "<" + (self._struct_format(offset_size) * (file_count + 1))
+        )
         # read all in one go
         cue_ids = buf.struct(read_cue_ids)
         raw_offs = buf.struct(read_raw_offs)
@@ -179,9 +191,12 @@ class AFSArchive(object):
         offsets_for_length_calculating = unaligned_offs[1:]
         lengths = itertools.starmap(
             lambda my_offset, next_offset: next_offset - my_offset,
-            zip(aligned_offs, offsets_for_length_calculating))
+            zip(aligned_offs, offsets_for_length_calculating),
+        )
 
-        self.files = list(itertools.starmap(afs2_file_ent_t, zip(cue_ids, aligned_offs, lengths)))
+        self.files = list(
+            itertools.starmap(afs2_file_ent_t, zip(cue_ids, aligned_offs, lengths))
+        )
 
     def file_data_for_cue_id(self, cue_id, rw=False):
         for f in self.files:
@@ -192,41 +207,50 @@ class AFSArchive(object):
                     return buf
                 else:
                     return self.src.bytes(f.size, at=f.offset)
-        else:
-            raise ValueError("id {0} not found in archive".format(cue_id))
+        raise ValueError(f"id {cue_id} not found in archive")
 
-AnyFile = Union[str, os.PathLike, BinaryIO]
+
+AnyFile = str | os.PathLike | io.BufferedIOBase
 Uninitialized = object()
 
-def _get_file_obj(name: AnyFile) -> Tuple[BinaryIO, bool]:
+
+def _get_file_obj(name: AnyFile) -> tuple[io.BufferedIOBase, bool]:
     if isinstance(name, (str, os.PathLike)):
         return open(name, "rb"), True
     else:
         return name, False
 
+
 class ACBFile(object):
-    """ Represents an ACB file.
+    """Represents an ACB file.
 
-        You should call the close() method to release the underlying file objects
-        when finished, or use the object as a context manager.
-        Tracks can be accessed using .track_list together with get_track_data().
+    You should call the close() method to release the underlying file objects
+    when finished, or use the object as a context manager.
+    Tracks can be accessed using .track_list together with get_track_data().
 
-        Constructor arguments:
-        - acb_file: Path to the file, or an open file object in binary mode.
-        - extern_awb: Path to the streaming AWB file, if needed.
-        - hca_keys: HCA keys in string format. Can be one of:
-            "0xLOWBYTES,0xHIGHBYTES", "0xHIGHBYTESLOWBYTES", or None.
-            "0xLOWBYTES,0xHIGHBYTES" is equivalent to invoking hca_decoder
-            with arguments "-a LOWBYTES -b HIGHBYTES".
-            If None, HCA files will not be decrypted.
-        - encoding: String encoding to use when reading the file. If this is
-            not passed, we'll try reading it as Shift-JIS first (for backwards
-            compatibility reasons), and then UTF-8, before giving up. If an 
-            encoding is explicitly passed, only that encoding will be used. 
+    Constructor arguments:
+    - acb_file: Path to the file, or an open file object in binary mode.
+    - extern_awb: Path to the streaming AWB file, if needed.
+    - hca_keys: HCA keys in string format. Can be one of:
+        "0xLOWBYTES,0xHIGHBYTES", "0xHIGHBYTESLOWBYTES", or None.
+        "0xLOWBYTES,0xHIGHBYTES" is equivalent to invoking hca_decoder
+        with arguments "-a LOWBYTES -b HIGHBYTES".
+        If None, HCA files will not be decrypted.
+    - encoding: String encoding to use when reading the file. If this is
+        not passed, we'll try reading it as Shift-JIS first (for backwards
+        compatibility reasons), and then UTF-8, before giving up. If an
+        encoding is explicitly passed, only that encoding will be used.
     """
-    def __init__(self, acb_file: AnyFile, extern_awb: Optional[AnyFile] = None, hca_keys: Optional[str] = None, encoding: Optional[str] = None):
+
+    def __init__(
+        self,
+        acb_file: AnyFile,
+        extern_awb: AnyFile | None = None,
+        hca_keys: str | None = None,
+        encoding: str | None = None,
+    ):
         self.acb_handle, self.acb_handle_owned = _get_file_obj(acb_file)
-        
+
         if extern_awb is None:
             self.awb_handle = None
             self.awb_handle_owned = False
@@ -246,64 +270,76 @@ class ACBFile(object):
                 raise
 
         if len(utf.rows[0]["AwbFile"]) > 0:
-            self.embedded_awb = AFSArchive(io.BytesIO(utf.rows[0]["AwbFile"]), encoding=self.encoding)
+            self.embedded_awb = AFSArchive(
+                io.BytesIO(utf.rows[0]["AwbFile"]), encoding=self.encoding
+            )
         else:
-            self.embedded_awb = None # type: ignore
+            self.embedded_awb = None  # type: ignore
 
         if self.awb_handle:
             self.external_awb = AFSArchive(self.awb_handle, encoding=self.encoding)
         else:
-            self.external_awb = None # type: ignore
+            self.external_awb = None  # type: ignore
 
         self.hca_keys = hca_keys
-        self.embedded_disarm: Optional[DisarmContext] = Uninitialized # type: ignore
-        self.external_disarm: Optional[DisarmContext] = Uninitialized # type: ignore
-        
+        self.embedded_disarm: DisarmContext | None = Uninitialized  # type: ignore
+        self.external_disarm: DisarmContext | None = Uninitialized  # type: ignore
+
         self.closed = False
-    
-    def get_embedded_disarm(self) -> Optional[DisarmContext]:
+
+    def get_embedded_disarm(self) -> DisarmContext | None:
         if self.embedded_disarm is Uninitialized:
             if self.hca_keys and self.embedded_awb:
-                self.embedded_disarm = DisarmContext(self.hca_keys, self.embedded_awb.mix_key)
+                self.embedded_disarm = DisarmContext(
+                    self.hca_keys, self.embedded_awb.mix_key
+                )
             else:
                 self.embedded_disarm = None
 
         return self.embedded_disarm
-    
-    def get_external_disarm(self) -> Optional[DisarmContext]:
+
+    def get_external_disarm(self) -> DisarmContext | None:
         if self.external_disarm is Uninitialized:
             if self.hca_keys and self.external_awb:
-                self.external_disarm = DisarmContext(self.hca_keys, self.external_awb.mix_key)
+                self.external_disarm = DisarmContext(
+                    self.hca_keys, self.external_awb.mix_key
+                )
             else:
                 self.external_disarm = None
         return self.external_disarm
 
-    def get_track_data(self, track: track_t, disarm: Optional[bool] = None, unmask: bool = True) -> bytearray:
-        """ Gets encoded audio data as a bytearray.
+    def get_track_data(
+        self, track: track_t, disarm: bool | None = None, unmask: bool = True
+    ) -> bytearray:
+        """Gets encoded audio data as a bytearray.
 
-            Arguments:
-            - track: The track to get data for, from .track_list.
-            - disarm: Whether to decrypt HCA data before returning it.
-                The default action is to decrypt if hca_keys were passed when creating
-                the ACBFile. You can pass False to skip decryption, or True to force
-                decryption. 
-                ValueError is raised you force decryption and keys were not passed.
-            - unmask: Whether to remove XOR masking from HCA header tags. 
-                This only has an effect if decryption is enabled, whether implicitly or
-                explicitly.
+        Arguments:
+        - track: The track to get data for, from .track_list.
+        - disarm: Whether to decrypt HCA data before returning it.
+            The default action is to decrypt if hca_keys were passed when creating
+            the ACBFile. You can pass False to skip decryption, or True to force
+            decryption.
+            ValueError is raised you force decryption and keys were not passed.
+        - unmask: Whether to remove XOR masking from HCA header tags.
+            This only has an effect if decryption is enabled, whether implicitly or
+            explicitly.
         """
         if self.closed:
             raise ValueError("ACBFile is closed")
 
         if track.is_stream:
             if not self.external_awb:
-                raise ValueError("Track {0} is streamed, but there's no external AWB attached.".format(track))
+                raise ValueError(
+                    f"Track {track} is streamed, but there's no external AWB attached."
+                )
 
             buf = self.external_awb.file_data_for_cue_id(track.cue_id, rw=True)
             disarmer = self.get_external_disarm()
         else:
             if not self.embedded_awb:
-                raise ValueError("Track {0} is internal, but this ACB file has no internal AWB.".format(track))
+                raise ValueError(
+                    f"Track {track} is internal, but this ACB file has no internal AWB."
+                )
 
             buf = self.embedded_awb.file_data_for_cue_id(track.cue_id, rw=True)
             disarmer = self.get_embedded_disarm()
@@ -314,9 +350,9 @@ class ACBFile(object):
                 "Either remove the disarm= argument from the call to get_track_data, "
                 "or provide keys using the hca_keys= argument to ACBFile."
             )
-    
+
         if disarm is None:
-            disarm = (disarmer is not None)
+            disarm = disarmer is not None
 
         if disarm and disarmer:
             disarmer.disarm(buf, not unmask)
@@ -326,15 +362,15 @@ class ACBFile(object):
     def __enter__(self):
         return self
 
-    def __exit__(self, type, value, traceback):
+    def __exit__(self, _1, _2, _3):
         self.close()
 
     def close(self):
-        """ Close any open files held by ACBFile. If you passed file objects
-            instead of paths when creating the ACBFile instance, they will
-            not be closed.
+        """Close any open files held by ACBFile. If you passed file objects
+        instead of paths when creating the ACBFile instance, they will
+        not be closed.
 
-            Can be called multiple times; subsequent calls will have no effect.
+        Can be called multiple times; subsequent calls will have no effect.
         """
         if self.acb_handle_owned:
             self.acb_handle.close()
@@ -354,39 +390,43 @@ def find_awb(path):
         if os.path.exists(awb_path):
             return awb_path
 
+
 def name_gen_default(track):
-    return "{0}{1}".format(track.name, wave_type_ftable.get(track.enc_type, track.enc_type))
+    return f"{track.name}{wave_type_ftable.get(track.enc_type, track.enc_type)}"
+
 
 def extract_acb(
     acb_file: AnyFile,
     target_dir: str,
-    extern_awb: Optional[AnyFile] = None,
-    hca_keys: Optional[str] = None,
+    extern_awb: AnyFile | None = None,
+    hca_keys: str | None = None,
     name_gen: Callable[[track_t], str] = name_gen_default,
     no_unmask: bool = False,
-    encoding: Optional[str] = None
+    encoding: str | None = None,
 ):
-    """ Oneshot file extraction API. Dumps all tracks from a file into the
-        named output directory.
+    """Oneshot file extraction API. Dumps all tracks from a file into the
+    named output directory.
 
-        Arguments:
-        - acb_file: Path to the file, or an open file object in binary mode.
-        - target_dir: Path to the destination directory. Must already exist.
-        - extern_awb: Path to the streaming AWB file, if needed.
-        - hca_keys: Same as ACBFile's hca_keys argument.
-        - name_gen: A callable taking the track_t object and returning a 
-            destination filename. Should not return absolute paths, as
-            they will be prefixed with the target_dir.
-        - no_unmask: See ACBFile.get_track_data's unmask argument. For 
-            compatibility reasons, the meaning of this flag is reversed;
-            i.e. True will result in unmasking being disabled.
-        - encoding: Encoding used for track names. See ACBFile's docstring
-            for behaviour when this argument is None/omitted. 
+    Arguments:
+    - acb_file: Path to the file, or an open file object in binary mode.
+    - target_dir: Path to the destination directory. Must already exist.
+    - extern_awb: Path to the streaming AWB file, if needed.
+    - hca_keys: Same as ACBFile's hca_keys argument.
+    - name_gen: A callable taking the track_t object and returning a
+        destination filename. Should not return absolute paths, as
+        they will be prefixed with the target_dir.
+    - no_unmask: See ACBFile.get_track_data's unmask argument. For
+        compatibility reasons, the meaning of this flag is reversed;
+        i.e. True will result in unmasking being disabled.
+    - encoding: Encoding used for track names. See ACBFile's docstring
+        for behaviour when this argument is None/omitted.
     """
     if isinstance(acb_file, str) and extern_awb is None:
         extern_awb = find_awb(acb_file)
 
-    with ACBFile(acb_file, extern_awb=extern_awb, hca_keys=hca_keys, encoding=encoding) as acb:
+    with ACBFile(
+        acb_file, extern_awb=extern_awb, hca_keys=hca_keys, encoding=encoding
+    ) as acb:
         for track in acb.track_list.tracks:
             name = name_gen(track)
 
