@@ -13,6 +13,12 @@ python3 -m acb somefile.acb output
 acbextract somefile.acb output
 ```
 
+```py
+# equivalent
+from acb import acb
+acb.extract_acb("somefile.acb", "output")
+```
+
 You can also pass `--disarm-with=key1,key2` to have the library decrypt (but not decode) files for you. The key format
 `--disarm-with=k1,k2` is equivalent to `hca_decoder -a k1 -b k2`, but you can also combine them into a 64-bit hex integer.
 This also supports AWB embedded keys (see [here](https://github.com/hozuki/libcgss/issues/4)).
