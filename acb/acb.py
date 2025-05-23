@@ -69,7 +69,11 @@ wave_type_ftable = {
     WAVEFORM_ENCODE_TYPE_BCWAV        : ".bcwav",
     WAVEFORM_ENCODE_TYPE_NINTENDO_DSP : ".dsp"}
 
-track_t = T("track_t", ("cue_id", "name", "memory_wav_id", "external_wav_id", "enc_type", "is_stream"))
+track_t = T(
+    "track_t",
+    ("cue_id", "name", "enc_type", "is_stream"),
+)
+
 
 class TrackList(object):
     def __init__(self, utf):
@@ -89,22 +93,32 @@ class TrackList(object):
         for row in nams.rows:
             name_map[row["CueIndex"]] = row["CueName"]
 
-        for ind, row in enumerate(cues.rows):
+        for row in cues.rows:
             if row["ReferenceType"] not in {3, 8}:
-                raise RuntimeError("ReferenceType {0} not implemented.".format(row["ReferenceType"]))
+                raise RuntimeError(
+                    f"ReferenceType {row["ReferenceType"]} not implemented."
+                )
 
-            r_data = syns.rows[row["ReferenceIndex"]]["ReferenceItems"]
-            a, b = struct.unpack(">HH", r_data)
+            for i in range(row["NumRelatedWaveforms"]):
+                r_data = syns.rows[row["ReferenceIndex"] + i]["ReferenceItems"]
+                _, b = struct.unpack(">HH", r_data)
+                wav_id = wavs.rows[b].get("Id")
+                if wav_id is None:
+                    wav_id = wavs.rows[b]["MemoryAwbId"]
+                extern_wav_id = wavs.rows[b]["StreamAwbId"]
+                enc = wavs.rows[b]["EncodeType"]
+                is_stream = wavs.rows[b]["Streaming"]
 
-            wav_id = wavs.rows[b].get("Id")
-            if wav_id is None:
-                wav_id = wavs.rows[b]["MemoryAwbId"]
-            extern_wav_id = wavs.rows[b]["StreamAwbId"]
-            enc = wavs.rows[b]["EncodeType"]
-            is_stream = wavs.rows[b]["Streaming"]
+                self.tracks.append(
+                    track_t(
+                        extern_wav_id if is_stream else wav_id,
+                        name_map.get(row["ReferenceIndex"], "UNKNOWN")
+                        + ("" if row["NumRelatedWaveforms"] == 1 else f"_{i+1:02}"),
+                        enc,
+                        is_stream,
+                    )
+                )
 
-            self.tracks.append(track_t(row["CueId"], name_map.get(ind, "UNKNOWN"), wav_id,
-                extern_wav_id, enc, is_stream))
 
 def align(n):
     def _align(number):
@@ -285,13 +299,13 @@ class ACBFile(object):
             if not self.external_awb:
                 raise ValueError("Track {0} is streamed, but there's no external AWB attached.".format(track))
 
-            buf = self.external_awb.file_data_for_cue_id(track.external_wav_id, rw=True)
+            buf = self.external_awb.file_data_for_cue_id(track.cue_id, rw=True)
             disarmer = self.get_external_disarm()
         else:
             if not self.embedded_awb:
                 raise ValueError("Track {0} is internal, but this ACB file has no internal AWB.".format(track))
 
-            buf = self.embedded_awb.file_data_for_cue_id(track.memory_wav_id, rw=True)
+            buf = self.embedded_awb.file_data_for_cue_id(track.cue_id, rw=True)
             disarmer = self.get_embedded_disarm()
 
         if disarm is True and not disarmer:
