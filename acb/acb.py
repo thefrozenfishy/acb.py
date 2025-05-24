@@ -84,8 +84,11 @@ class TrackList(object):
         wav_handle = io.BytesIO(utf.rows[0]["WaveformTable"])
         syn_handle = io.BytesIO(utf.rows[0]["SynthTable"])
 
+        # cues = cue metadata, names = filename. len(cues.rows) == len(nams.rows)
         cues = UTFTable(cue_handle, encoding=utf.encoding)
         nams = UTFTable(nam_handle, encoding=utf.encoding)
+
+        # wavs = audio metadata, syns = more metadata? len(wavs.rows) == len(syns.rows)
         wavs = UTFTable(wav_handle, encoding=utf.encoding)
         syns = UTFTable(syn_handle, encoding=utf.encoding)
 
@@ -95,6 +98,7 @@ class TrackList(object):
         for row in nams.rows:
             name_map[row["CueIndex"]] = row["CueName"]
 
+        wav_idx = 0
         for row in cues.rows:
             if row["ReferenceType"] not in {3, 8}:
                 raise RuntimeError(
@@ -102,7 +106,8 @@ class TrackList(object):
                 )
 
             for i in range(row["NumRelatedWaveforms"]):
-                r_data = syns.rows[row["ReferenceIndex"] + i]["ReferenceItems"]
+                r_data = syns.rows[wav_idx]["ReferenceItems"]
+                wav_idx += 1
                 _, b = struct.unpack(">HH", r_data)
                 wav_id = wavs.rows[b].get("Id")
                 if wav_id is None:
@@ -120,6 +125,11 @@ class TrackList(object):
                         is_stream,
                     )
                 )
+
+        if len(wavs.rows) > len(self.tracks):
+            raise ValueError(
+                f"Missed wavs. Has {cues} and {wavs}, but made {len(self.tracks)} tracks"
+            )
 
 
 def align(n):
