@@ -155,8 +155,17 @@ class TrackList(object):
         for cue_index, row in enumerate(cues):
             cue_name = name_map.get(cue_index) or f"UNKNOWN_{row.get('CueId', cue_index)}"
             wav_indexes = self._resolve(row["ReferenceType"], row["ReferenceIndex"], set())
-            # The same waveform can be reachable through several paths; export it once per cue.
+            # The same audio can be reachable through several paths, and separate Waveform rows
+            # can point at the same AWB entry; export each distinct AWB entry once per cue.
             wav_indexes = list(dict.fromkeys(wav_indexes))
+            seen_audio = set()
+            unique = []
+            for w in wav_indexes:
+                k = self._audio_key(w)
+                if k not in seen_audio:
+                    seen_audio.add(k)
+                    unique.append(w)
+            wav_indexes = unique
 
             expected = row.get("NumRelatedWaveforms")
             if expected is not None and expected != len(wav_indexes):
@@ -171,10 +180,22 @@ class TrackList(object):
                 name = cue_name if len(wav_indexes) == 1 else f"{cue_name}_{i + 1:02}"
                 self._add_track(w, name, used_names)
 
-        self.unreferenced_waveforms = [i for i in range(len(wavs)) if i not in referenced]
+        played = {self._audio_key(i) for i in referenced}
+        self.unreferenced_waveforms = []
+        for i in range(len(wavs)):
+            if i not in referenced and self._audio_key(i) not in played:
+                played.add(self._audio_key(i))
+                self.unreferenced_waveforms.append(i)
         for w in self.unreferenced_waveforms:
             self.warnings.append(f"waveform {w} is not referenced by any cue")
             self._add_track(w, f"UNREFERENCED_{w}", used_names)
+
+    def _audio_key(self, w):
+        wav = self.wavs[w]
+        if wav.get("Streaming"):
+            return ("stream", wav.get("StreamAwbId"))
+        mem_id = wav.get("Id")
+        return ("memory", wav.get("MemoryAwbId") if mem_id is None else mem_id)
 
     def _add_track(self, w, name, used_names):
         wav = self.wavs[w]
