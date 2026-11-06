@@ -77,59 +77,175 @@ track_t = T(
 )
 
 
+REFERENCE_WAVEFORM = 1
+REFERENCE_SYNTH = 2
+REFERENCE_SEQUENCE = 3
+REFERENCE_BLOCK_SEQUENCE = 8
+
+# Track event commands that start playback of a synth/sequence.
+COMMAND_NOTE_ON = 2000
+COMMAND_NOTE_ON_WITH_NO = 2003
+COMMAND_END = 0
+
+
+def _u16_list(data) -> list[int]:
+    if not data:
+        return []
+    return list(struct.unpack(f">{len(data) // 2}H", data[: len(data) // 2 * 2]))
+
+
+def _ref_items(data) -> list[tuple[int, int]]:
+    """Synth ReferenceItems: a packed list of (u16 type, u16 index) pairs."""
+    vals = _u16_list(data)
+    return list(zip(vals[0::2], vals[1::2]))
+
+
+def _iter_commands(data):
+    """Track event command stream: repeated (u16 code, u8 size, payload)."""
+    pos = 0
+    while pos + 3 <= len(data):
+        code, size = struct.unpack_from(">HB", data, pos)
+        pos += 3
+        yield code, data[pos : pos + size]
+        pos += size
+        if code == COMMAND_END:
+            return
+
+
+def _table(utf, name, encoding):
+    raw = utf.rows[0].get(name)
+    if not raw:
+        return []
+    return UTFTable(io.BytesIO(raw), encoding=encoding).rows
+
+
 class TrackList(object):
+    """Resolves every cue to the waveform(s) it can play.
+
+    Walks Cue -> (Waveform | Synth | Sequence | BlockSequence) -> Track ->
+    TrackEvent noteOn -> Synth -> Waveform, the same graph the CRI runtime uses.
+
+    After construction:
+    - tracks: one track_t per (cue, distinct waveform) pair.
+    - unreferenced_waveforms: waveform indexes no cue reaches. These are still
+      present in the AWB; they are exported as tracks named "UNREFERENCED_<id>".
+    - warnings: human-readable notes about anything odd in the file.
+    """
+
     def __init__(self, utf):
-        cue_handle = io.BytesIO(utf.rows[0]["CueTable"])
-        nam_handle = io.BytesIO(utf.rows[0]["CueNameTable"])
-        wav_handle = io.BytesIO(utf.rows[0]["WaveformTable"])
-        syn_handle = io.BytesIO(utf.rows[0]["SynthTable"])
-
-        # cues = cue metadata, names = filename. len(cues.rows) == len(nams.rows)
-        cues = UTFTable(cue_handle, encoding=utf.encoding)
-        nams = UTFTable(nam_handle, encoding=utf.encoding)
-
-        # wavs = audio metadata, syns = more metadata? len(wavs.rows) == len(syns.rows)
-        wavs = UTFTable(wav_handle, encoding=utf.encoding)
-        syns = UTFTable(syn_handle, encoding=utf.encoding)
+        enc = utf.encoding
+        cues = _table(utf, "CueTable", enc)
+        nams = _table(utf, "CueNameTable", enc)
+        self.wavs = wavs = _table(utf, "WaveformTable", enc)
+        self.syns = _table(utf, "SynthTable", enc)
+        self.seqs = _table(utf, "SequenceTable", enc)
+        self.trks = _table(utf, "TrackTable", enc)
+        self.blk_seqs = _table(utf, "BlockSequenceTable", enc)
+        self.blks = _table(utf, "BlockTable", enc)
+        self.events = _table(utf, "TrackEventTable", enc) or _table(utf, "CommandTable", enc)
 
         self.tracks: list[track_t] = []
+        self.warnings: list[str] = []
 
-        name_map = {}
-        for row in nams.rows:
-            name_map[row["CueIndex"]] = row["CueName"]
+        # CueNameTable.CueIndex is a row index into CueTable (not ReferenceIndex).
+        name_map = {row["CueIndex"]: row["CueName"] for row in nams}
 
-        wav_idx = 0
-        for row in cues.rows:
-            if row["ReferenceType"] not in {3, 8}:
-                raise RuntimeError(
-                    f"ReferenceType {row["ReferenceType"]} not implemented."
+        referenced: set[int] = set()
+        used_names: set[str] = set()
+        for cue_index, row in enumerate(cues):
+            cue_name = name_map.get(cue_index) or f"UNKNOWN_{row.get('CueId', cue_index)}"
+            wav_indexes = self._resolve(row["ReferenceType"], row["ReferenceIndex"], set())
+            # The same waveform can be reachable through several paths; export it once per cue.
+            wav_indexes = list(dict.fromkeys(wav_indexes))
+
+            expected = row.get("NumRelatedWaveforms")
+            if expected is not None and expected != len(wav_indexes):
+                self.warnings.append(
+                    f"cue {cue_name}: NumRelatedWaveforms={expected} but resolved {len(wav_indexes)}"
                 )
+            if not wav_indexes:
+                self.warnings.append(f"cue {cue_name}: references no waveforms")
 
-            for i in range(row["NumRelatedWaveforms"]):
-                r_data = syns.rows[wav_idx]["ReferenceItems"]
-                wav_idx += 1
-                _, b = struct.unpack(">HH", r_data)
-                wav_id = wavs.rows[b].get("Id")
-                if wav_id is None:
-                    wav_id = wavs.rows[b]["MemoryAwbId"]
-                extern_wav_id = wavs.rows[b]["StreamAwbId"]
-                enc = wavs.rows[b]["EncodeType"]
-                is_stream = wavs.rows[b]["Streaming"]
+            for i, w in enumerate(wav_indexes):
+                referenced.add(w)
+                name = cue_name if len(wav_indexes) == 1 else f"{cue_name}_{i + 1:02}"
+                self._add_track(w, name, used_names)
 
-                self.tracks.append(
-                    track_t(
-                        extern_wav_id if is_stream else wav_id,
-                        name_map.get(row["ReferenceIndex"], "UNKNOWN")
-                        + ("" if row["NumRelatedWaveforms"] == 1 else f"_{i+1:02}"),
-                        enc,
-                        is_stream,
-                    )
-                )
+        self.unreferenced_waveforms = [i for i in range(len(wavs)) if i not in referenced]
+        for w in self.unreferenced_waveforms:
+            self.warnings.append(f"waveform {w} is not referenced by any cue")
+            self._add_track(w, f"UNREFERENCED_{w}", used_names)
 
-        if len(wavs.rows) > len(self.tracks):
-            raise ValueError(
-                f"Missed wavs. Has {cues} and {wavs}, but made {len(self.tracks)} tracks"
-            )
+    def _add_track(self, w, name, used_names):
+        wav = self.wavs[w]
+        mem_id = wav.get("Id")
+        if mem_id is None:
+            mem_id = wav.get("MemoryAwbId")
+        is_stream = wav.get("Streaming", 0)
+        # Streaming=2 means a short memory preload plus the full stream; the stream is the real file.
+        awb_id = wav.get("StreamAwbId") if is_stream else mem_id
+        if name in used_names:
+            name = f"{name}__{w}"
+        used_names.add(name)
+        self.tracks.append(track_t(awb_id, name, wav["EncodeType"], bool(is_stream)))
+
+    def _resolve(self, ref_type, index, seen) -> list[int]:
+        key = (ref_type, index)
+        if key in seen:  # guard against reference loops
+            return []
+        seen = seen | {key}
+
+        if ref_type == REFERENCE_WAVEFORM:
+            if index >= len(self.wavs):
+                self.warnings.append(f"waveform index {index} out of range")
+                return []
+            return [index]
+
+        if ref_type == REFERENCE_SYNTH:
+            if index >= len(self.syns):
+                self.warnings.append(f"synth index {index} out of range")
+                return []
+            out = []
+            for t, i in _ref_items(self.syns[index].get("ReferenceItems")):
+                out += self._resolve(t, i, seen)
+            return out
+
+        if ref_type == REFERENCE_SEQUENCE:
+            if index >= len(self.seqs):
+                self.warnings.append(f"sequence index {index} out of range")
+                return []
+            return self._resolve_tracks(_u16_list(self.seqs[index].get("TrackIndex")), seen)
+
+        if ref_type == REFERENCE_BLOCK_SEQUENCE:
+            if index >= len(self.blk_seqs):
+                self.warnings.append(f"block sequence index {index} out of range")
+                return []
+            bs = self.blk_seqs[index]
+            out = self._resolve_tracks(_u16_list(bs.get("TrackIndex")), seen)
+            for b in _u16_list(bs.get("BlockIndex")):
+                if b < len(self.blks):
+                    out += self._resolve_tracks(_u16_list(self.blks[b].get("TrackIndex")), seen)
+            return out
+
+        if ref_type == 0:  # empty reference
+            return []
+        self.warnings.append(f"ReferenceType {ref_type} not implemented")
+        return []
+
+    def _resolve_tracks(self, track_indexes, seen) -> list[int]:
+        out = []
+        for t in track_indexes:
+            if t >= len(self.trks):
+                self.warnings.append(f"track index {t} out of range")
+                continue
+            ev = self.trks[t].get("EventIndex", self.trks[t].get("CommandIndex"))
+            if ev is None or ev == 0xFFFF or ev >= len(self.events):
+                continue
+            for code, payload in _iter_commands(self.events[ev].get("Command") or b""):
+                if code in (COMMAND_NOTE_ON, COMMAND_NOTE_ON_WITH_NO) and len(payload) >= 4:
+                    tlv_type, tlv_index = struct.unpack_from(">HH", payload)
+                    out += self._resolve(tlv_type, tlv_index, seen)
+        return out
 
 
 def align(n):

@@ -258,11 +258,18 @@ class UTFTable(object):
             occurrence = field_type & COLUMN_STORAGE_MASK
             type_key = field_type & COLUMN_TYPE_MASK
 
-            if occurrence in (COLUMN_STORAGE_CONSTANT, COLUMN_STORAGE_CONSTANT2):
+            if occurrence == COLUMN_STORAGE_ZERO:
+                # Name only: no default and no per-row data. Value is absent.
+                name = buf.string0(at=self.header.string_table_offset + 8 + name_offset)
+                constants[name] = None
+            elif occurrence == COLUMN_STORAGE_CONSTANT:
                 name = buf.string0(at=self.header.string_table_offset + 8 + name_offset)
                 val = column_data_dtable[type_key](buf)
                 constants[name] = val
             else:
+                if occurrence == COLUMN_STORAGE_CONSTANT2:
+                    # Default value present in the schema *and* per-row data follows; skip the default.
+                    column_data_dtable[type_key](buf)
                 dynamic_keys.append(buf.string0(at=self.header.string_table_offset + 8 + name_offset))
                 format += column_data_stable[type_key]
 
