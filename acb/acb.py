@@ -384,8 +384,8 @@ class ACBFile(object):
         with arguments "-a LOWBYTES -b HIGHBYTES".
         If None, HCA files will not be decrypted.
     - encoding: String encoding to use when reading the file. If this is
-        not passed, we'll try reading it as Shift-JIS first (for backwards
-        compatibility reasons), and then UTF-8, before giving up. If an
+        not passed, we'll try reading it as UTF-8 first, and then Shift-JIS,
+        before giving up. If an
         encoding is explicitly passed, only that encoding will be used.
     """
 
@@ -404,14 +404,16 @@ class ACBFile(object):
         else:
             self.awb_handle, self.awb_handle_owned = _get_file_obj(extern_awb)
 
-        self.encoding = encoding or "sjis"
+        # UTF-8 first: Shift-JIS happily "decodes" UTF-8 bytes into mojibake, the reverse rarely succeeds.
+        self.encoding = encoding or "utf-8"
         try:
-            utf = UTFTable(self.acb_handle, encoding=encoding or "sjis")
+            utf = UTFTable(self.acb_handle, encoding=self.encoding)
             self.track_list = TrackList(utf)
         except UnicodeDecodeError:
             if encoding is None:
-                self.encoding = "utf-8"
-                utf = UTFTable(self.acb_handle, encoding="utf-8")
+                self.encoding = "sjis"
+                self.acb_handle.seek(0)
+                utf = UTFTable(self.acb_handle, encoding="sjis")
                 self.track_list = TrackList(utf)
             else:
                 raise
