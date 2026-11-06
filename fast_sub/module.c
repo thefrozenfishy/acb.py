@@ -34,8 +34,8 @@ static PyModuleDef modinfo = {
     .m_name = "_acb_speedup",
     .m_doc = "Speedups for disarm_actual",
     .m_size = 0,
-    .m_methods = fd_top_level,
-    .m_slots = &modslots,
+    .m_methods = (PyMethodDef *)fd_top_level,
+    .m_slots = (PyModuleDef_Slot *)modslots,
 };
 
 ////////////////////////////////////////////////////////
